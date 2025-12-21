@@ -1,0 +1,15 @@
+name: mlflow-env
+channels:
+  - defaults
+dependencies:
+  - python=3.10
+  - pip
+  - pip:
+    - mlflow
+    - scikit-learn
+    - pandas
+    - numpy
+    - dagshub
+    - matplotlib
+    - seaborn
+    - cloudpickle
