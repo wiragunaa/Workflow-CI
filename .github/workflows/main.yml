@@ -37,6 +37,7 @@ jobs:
           cd MLProject
           mkdir -p mlruns
           export MLFLOW_TRACKING_URI=file:./mlruns
+          export MLFLOW_EXPERIMENT_NAME=rf_baseline_experiment
           mlflow run . --env-manager=local
 
       - name: Get latest Mlflow run_id
