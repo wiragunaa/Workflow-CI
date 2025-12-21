@@ -4,6 +4,7 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
+import json
 
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import (
@@ -175,7 +176,130 @@ def main():
 		python_env.write_text(conda_content)
 		mlflow.log_artifact(str(python_env))
 
-		# Model is logged automatically by mlflow.autolog()
+		# Also save a final set of artifacts similar to the tuning script's "best model" output
+		final_artifacts = base_dir / "tuning_final"
+		final_artifacts.mkdir(exist_ok=True)
+		conda_final = final_artifacts / "conda.yaml"
+		conda_final.write_text(conda_content)
+		mlflow.log_artifact(str(conda_final), artifact_path="model_tuned")
+
+		# attempt to log the sklearn model with conda env
+		try:
+			mlflow.sklearn.log_model(model, artifact_path="model_tuned", conda_env=str(conda_final))
+		except Exception:
+			try:
+				mlflow.sklearn.log_model(model, artifact_path="model_tuned")
+			except Exception:
+				pass
+
+		# save top feature importances plot
+		try:
+			fi_path = final_artifacts / "best_feature_importances.png"
+			fi_series = pd.Series(model.feature_importances_, index=X_train.columns).sort_values(ascending=False)[:50]
+			plt.figure(figsize=(8, 6))
+			sns.barplot(x=fi_series.values, y=fi_series.index)
+			plt.xlabel("Importance")
+			plt.tight_layout()
+			plt.savefig(fi_path)
+			plt.close()
+			mlflow.log_artifact(str(fi_path), artifact_path="model_tuned")
+		except Exception:
+			fi_series = None
+
+		# predictions, probabilities and metrics
+		y_pred_best = y_pred
+		try:
+			if hasattr(model, "predict_proba"):
+				y_proba_best = model.predict_proba(X_test)[:, 1]
+			else:
+				y_proba_best = model.decision_function(X_test)
+		except Exception:
+			y_proba_best = np.zeros(len(X_test))
+
+		metrics = {
+			"test_accuracy": float(acc),
+			"test_precision": float(prec),
+			"test_recall": float(rec),
+			"test_f1": float(f1),
+			"test_roc_auc": float(roc_auc) if len(np.unique(y_test)) > 1 else 0.0,
+		}
+		metrics_path = final_artifacts / "metrics.json"
+		metrics_path.write_text(json.dumps(metrics, indent=2))
+		mlflow.log_artifact(str(metrics_path), artifact_path="model_tuned")
+
+		for k, v in metrics.items():
+			mlflow.log_metric(f"best_{k}", float(v))
+
+		preds_path = final_artifacts / "predictions.csv"
+		preds_df = pd.DataFrame({
+			"y_true": np.asarray(y_test).ravel(),
+			"y_pred": np.asarray(y_pred_best).ravel(),
+			"y_proba": np.asarray(y_proba_best).ravel(),
+		})
+		preds_df.to_csv(preds_path, index=False)
+		mlflow.log_artifact(str(preds_path), artifact_path="model_tuned")
+
+		# save model pickle
+		model_pkl = final_artifacts / "model.pkl"
+		with open(model_pkl, "wb") as f:
+			pickle.dump(model, f)
+		mlflow.log_artifact(str(model_pkl), artifact_path="model_tuned")
+
+		# copy requirements if present
+		repo_req = base_dir / "requirements.txt"
+		if repo_req.exists():
+			dest_req = final_artifacts / "requirements.txt"
+			shutil.copy(repo_req, dest_req)
+			mlflow.log_artifact(str(dest_req), artifact_path="model_tuned")
+
+		# write a simple estimator summary HTML
+		try:
+			params_html = "\n".join([f"<li>{k}: {v}</li>" for k, v in params.items()])
+		except Exception:
+			params_html = ""
+		try:
+			fi_html = "\n".join([f"<li>{feat}: {val:.6f}</li>" for feat, val in (fi_series.items() if fi_series is not None else [])])
+		except Exception:
+			fi_html = ""
+		estimator_content = f"""
+<!doctype html>
+<html>
+  <head><meta charset=\"utf-8\"><title>Estimator Summary</title></head>
+  <body>
+    <h1>Estimator Summary</h1>
+    <h2>Model Params</h2>
+    <ul>
+    {params_html}
+    </ul>
+    <h2>Top Feature Importances</h2>
+    <ul>
+    {fi_html}
+    </ul>
+  </body>
+</html>
+"""
+		estimator_html = final_artifacts / "estimator.html"
+		estimator_html.write_text(estimator_content)
+		mlflow.log_artifact(str(estimator_html), artifact_path="model_tuned")
+
+		# training confusion matrix
+		try:
+			y_train_pred = model.predict(X_train)
+			train_cm_path = final_artifacts / "training_confusion_matrix.png"
+			plot_and_save_confusion_matrix(y_train, y_train_pred, train_cm_path)
+			mlflow.log_artifact(str(train_cm_path), artifact_path="model_tuned")
+		except Exception:
+			pass
+
+		# additional info
+		metric_info = {
+			"model_type": type(model).__name__,
+			"params": params,
+			"metrics": metrics,
+		}
+		metric_info_path = final_artifacts / "metric_info.json"
+		metric_info_path.write_text(json.dumps(metric_info, indent=2))
+		mlflow.log_artifact(str(metric_info_path), artifact_path="model_tuned")
 
 		print("Run completed. Logged params, metrics, model, and artifacts to MLflow.")
 
