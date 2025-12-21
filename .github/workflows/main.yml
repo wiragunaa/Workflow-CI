@@ -43,12 +43,22 @@ jobs:
       - name: Get latest Mlflow run_id
         run: |
           cd MLProject
+
+          # prefer explicit run_id file written by modelling.py
+          if [ -f run_id.txt ]; then
+            RUN_ID=$(cat run_id.txt)
+            echo "RUN_ID=$RUN_ID" >> $GITHUB_ENV
+            echo "Detected RUN_ID from run_id.txt: $RUN_ID"
+            exit 0
+          fi
+
+          # fallback: check mlruns directory
           if [ -d "mlruns/0" ]; then
             RUN_ID=$(ls -1t mlruns/0 | head -n1)
             echo "RUN_ID=$RUN_ID" >> $GITHUB_ENV
-            echo "Detected RUN_ID=$RUN_ID"
+            echo "Detected RUN_ID from mlruns: $RUN_ID"
           else
-            echo "mlruns/0 not found"; exit 1
+            echo "mlruns/0 not found and run_id.txt missing; check previous step logs"; exit 1
           fi
 
       - name: Install Python dependencies
