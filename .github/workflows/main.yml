@@ -8,8 +8,6 @@ on:
 jobs:
   build-and-train:
     runs-on: ubuntu-latest
-    env:
-      MLFLOW_TRACKING_URI: file:./MLProject/mlruns
     steps:
       - name: Set up job
         run: echo "Starting training pipeline"
@@ -83,6 +81,9 @@ jobs:
           DOCKER_REPO: ${{ secrets.DOCKER_REPOSITORY }}
         run: |
           cd MLProject
+          # ensure mlruns exists and use it as tracking URI for artifact access
+          mkdir -p mlruns
+          export MLFLOW_TRACKING_URI=file:./mlruns
           echo "Using RUN_ID=${RUN_ID}"
           IMAGE_NAME="${DOCKER_USER}/${DOCKER_REPO}:${GITHUB_SHA}"
           mlflow models build-docker -m "runs:/${RUN_ID}/model" -n "$IMAGE_NAME"
