@@ -18,7 +18,6 @@ from sklearn.metrics import (
 
 import mlflow
 import mlflow.sklearn
-import dagshub
 import pickle
 import shutil
 from mlflow.models.signature import infer_signature
