@@ -88,11 +88,30 @@ def plot_and_save_roc(y_true, y_proba, out_path: Path):
 
 
 def main():
-	mlflow.set_tracking_uri("http://127.0.0.1:5000")
-	Path("./mlruns").mkdir(parents=True, exist_ok=True)
+	# base directory for data and local artifacts
+	base_dir = Path(__file__).resolve().parent
+
+	# determine MLflow tracking URI:
+	# 1) use MLFLOW_TRACKING_URI env var if provided
+	# 2) attempt to reach a local MLflow server at 127.0.0.1:5000
+	# 3) fallback to a local filesystem `mlruns` directory
+	tracking_uri = os.environ.get("MLFLOW_TRACKING_URI")
+	if tracking_uri:
+		mlflow.set_tracking_uri(tracking_uri)
+	else:
+		import socket
+		try:
+			# quick check whether a server is listening
+			sock = socket.create_connection(("127.0.0.1", 5000), timeout=1)
+			sock.close()
+			mlflow.set_tracking_uri("http://127.0.0.1:5000")
+		except Exception:
+			local_mlruns = base_dir / "mlruns"
+			local_mlruns.mkdir(parents=True, exist_ok=True)
+			mlflow.set_tracking_uri(f"file://{local_mlruns}")
+
 	mlflow.autolog()
 
-	base_dir = Path(__file__).resolve().parent
 	X_train, X_test, y_train, y_test = load_data(base_dir)
 
 	# define model and parameters to log
