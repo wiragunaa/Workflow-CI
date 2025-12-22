@@ -196,6 +196,15 @@ def main():
 		except Exception:
 			run_id = None
 
+		# write run_id to file for CI workflows to pick up
+		try:
+			if run_id:
+				run_id_path = base_dir / "run_id.txt"
+				run_id_path.write_text(run_id)
+				print(f"Wrote run_id to {run_id_path}: {run_id}")
+		except Exception:
+			pass
+
 		model_tuned_dir = artifacts_dir / "model_tuned"
 		model_tuned_dir.mkdir(exist_ok=True)
 
