@@ -1,265 +1,107 @@
 from pathlib import Path
-import os
+import tempfile
+import json
 import pandas as pd
-import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import (
-	accuracy_score,
-	precision_score,
-	recall_score,
-	f1_score,
-	roc_auc_score,
-	classification_report,
-	confusion_matrix,
+    accuracy_score, precision_score, recall_score, f1_score, 
+    roc_auc_score, classification_report, confusion_matrix
 )
+from sklearn.utils import estimator_html_repr
+from sklearn import set_config
 
 import mlflow
 import mlflow.sklearn
-import pickle
-import shutil
 from mlflow.models.signature import infer_signature
-import uuid
-from datetime import datetime
-import platform
-import sklearn as _sklearn
-
 
 def load_data(base_dir: Path):
-	# try several likely locations for the preprocessed files
-	candidates = [
-		base_dir / "online_shoppers_intention_preprocessing",
-		base_dir / "online_shoppers_intention_preprocessing" / "online_shoppers_intention_preprocessing",
-	]
-	data_dir = None
-	for c in candidates:
-		if (c / "X_train.csv").exists():
-			data_dir = c
-			break
-	if data_dir is None:
-		# fallback: search recursively under base_dir (one level deep)
-		for child in base_dir.iterdir():
-			p = child / "X_train.csv"
-			if p.exists():
-				data_dir = child
-				break
-	if data_dir is None:
-		raise FileNotFoundError(f"Could not find X_train.csv under {base_dir}")
+    for p in base_dir.rglob("X_train.csv"):
+        d = p.parent
+        return (
+            pd.read_csv(d / "X_train.csv"),
+            pd.read_csv(d / "X_test.csv"),
+            pd.read_csv(d / "y_train.csv").squeeze(),
+            pd.read_csv(d / "y_test.csv").squeeze(),
+        )
+    raise FileNotFoundError("Dataset preprocessing tidak ditemukan")
 
-	X_train = pd.read_csv(data_dir / "X_train.csv")
-	X_test = pd.read_csv(data_dir / "X_test.csv")
-	y_train = pd.read_csv(data_dir / "y_train.csv").squeeze()
-	y_test = pd.read_csv(data_dir / "y_test.csv").squeeze()
-	return X_train, X_test, y_train, y_test
-
-
-def save_classification_report(y_true, y_pred, out_path: Path):
-	report = classification_report(y_true, y_pred)
-	out_path.write_text(report)
-
-
-def plot_and_save_confusion_matrix(y_true, y_pred, out_path: Path):
-	cm = confusion_matrix(y_true, y_pred)
-	plt.figure(figsize=(6, 4))
-	sns.heatmap(cm, annot=True, fmt="d", cmap="Blues")
-	plt.xlabel("Predicted")
-	plt.ylabel("Actual")
-	plt.tight_layout()
-	plt.savefig(out_path)
-	plt.close()
-
-
-def plot_and_save_roc(y_true, y_proba, out_path: Path):
-	from sklearn.metrics import roc_curve, auc
-
-	fpr, tpr, _ = roc_curve(y_true, y_proba)
-	roc_auc = auc(fpr, tpr)
-	plt.figure(figsize=(6, 4))
-	plt.plot(fpr, tpr, label=f"ROC curve (AUC = {roc_auc:.4f})")
-	plt.plot([0, 1], [0, 1], linestyle="--", color="gray")
-	plt.xlabel("False Positive Rate")
-	plt.ylabel("True Positive Rate")
-	plt.legend(loc="lower right")
-	plt.tight_layout()
-	plt.savefig(out_path)
-	plt.close()
-
+def save_plot(fig, filename, tmp_dir):
+    path = tmp_dir / filename
+    fig.savefig(path, bbox_inches='tight')
+    plt.close(fig)
+    mlflow.log_artifact(str(path))
 
 def main():
-	# base directory for data and local artifacts
-	base_dir = Path(__file__).resolve().parent
+    mlflow.set_tracking_uri("http://127.0.0.1:5000")
+    mlflow.set_experiment("rf_baseline_experiment")
 
-	# determine MLflow tracking URI:
-	# 1) use MLFLOW_TRACKING_URI env var if provided
-	# 2) attempt to reach a local MLflow server at 127.0.0.1:5000
-	# 3) fallback to a local filesystem `mlruns` directory
-	tracking_uri = os.environ.get("MLFLOW_TRACKING_URI")
-	if tracking_uri:
-		mlflow.set_tracking_uri(tracking_uri)
-	else:
-		import socket
-		try:
-			# quick check whether a server is listening
-			sock = socket.create_connection(("127.0.0.1", 5000), timeout=1)
-			sock.close()
-			mlflow.set_tracking_uri("http://127.0.0.1:5000")
-		except Exception:
-			local_mlruns = base_dir / "mlruns"
-			local_mlruns.mkdir(parents=True, exist_ok=True)
-			mlflow.set_tracking_uri(f"file://{local_mlruns}")
+    # Load Data
+    base_dir = Path(__file__).resolve().parent
+    X_train, X_test, y_train, y_test = load_data(base_dir)
 
-	mlflow.autolog()
+    params = {
+        "n_estimators": 200,
+        "max_depth": 10,
+        "min_samples_split": 5,
+        "random_state": 42,
+    }
+    
+    model = RandomForestClassifier(**params, n_jobs=-1)
 
-	X_train, X_test, y_train, y_test = load_data(base_dir)
+    with mlflow.start_run(run_name="rf_baseline_manual"):
+        # 1. Log Params & Train
+        mlflow.log_params(params)
+        model.fit(X_train, y_train)
 
-	# define model and parameters to log
-	model = RandomForestClassifier(n_estimators=200, max_depth=10, min_samples_split=5, random_state=42, n_jobs=-1)
-	params = {
-		"n_estimators": 200,
-		"max_depth": 10,
-		"min_samples_split": 5,
-		"random_state": 42,
-	}
+        # 2. Predict & Metrics
+        y_pred = model.predict(X_test)
+        y_proba = model.predict_proba(X_test)[:, 1]
+        
+        metrics = {
+            "accuracy": accuracy_score(y_test, y_pred),
+            "precision": precision_score(y_test, y_pred, zero_division=0),
+            "recall": recall_score(y_test, y_pred, zero_division=0),
+            "f1": f1_score(y_test, y_pred, zero_division=0),
+            "roc_auc": roc_auc_score(y_test, y_proba),
+        }
+        mlflow.log_metrics(metrics)
 
-	mlflow.set_experiment("rf_baseline_experiment")
+        # 3. Artifacts 
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
 
-	with mlflow.start_run(run_name="rf_baseline"):
-		for k, v in params.items():
-			mlflow.log_param(k, v)
+            # File Teks & JSON
+            (tmp / "classification_report.txt").write_text(classification_report(y_test, y_pred))
+            (tmp / "metric_info.json").write_text(json.dumps(metrics, indent=4))
+            
+            # Estimator HTML
+            set_config(display="diagram")
+            (tmp / "estimator.html").write_text(estimator_html_repr(model))
 
-		# fit
-		model.fit(X_train, y_train)
+            # Confusion Matrix Plot
+            fig, ax = plt.subplots(figsize=(5, 4))
+            sns.heatmap(confusion_matrix(y_test, y_pred), annot=True, fmt="d", cmap="Blues", ax=ax)
+            ax.set(xlabel="Predicted", ylabel="Actual")
+            
+            # Logging Artefak ke Root
+            mlflow.log_artifact(str(tmp / "classification_report.txt"))
+            mlflow.log_artifact(str(tmp / "metric_info.json"))
+            mlflow.log_artifact(str(tmp / "estimator.html"))
+            save_plot(fig, "training_confusion_matrix.png", tmp)
 
-		y_pred = model.predict(X_test)
-		if hasattr(model, "predict_proba"):
-			y_proba = model.predict_proba(X_test)[:, 1]
-		else:
-			y_proba = model.decision_function(X_test)
+        # 4. Log Model
+        signature = infer_signature(X_train, model.predict(X_train))
+        mlflow.sklearn.log_model(
+            model,
+            artifact_path="model",
+            signature=signature,
+            input_example=X_train.head(3)
+        )
 
-		# compute metrics
-		acc = accuracy_score(y_test, y_pred)
-		prec = precision_score(y_test, y_pred, zero_division=0)
-		rec = recall_score(y_test, y_pred, zero_division=0)
-		f1 = f1_score(y_test, y_pred, zero_division=0)
-		roc_auc = roc_auc_score(y_test, y_proba)
-			
-		# Metrics are logged automatically by mlflow.autolog()
-
-		# save artifacts: classification report, confusion matrix, ROC plot
-		artifacts_dir = base_dir / "mlflow_artifacts"
-		artifacts_dir.mkdir(exist_ok=True)
-
-		cls_report_path = artifacts_dir / "classification_report.txt"
-		save_classification_report(y_test, y_pred, cls_report_path)
-		mlflow.log_artifact(str(cls_report_path))
-
-		cm_path = artifacts_dir / "confusion_matrix.png"
-		plot_and_save_confusion_matrix(y_test, y_pred, cm_path)
-		mlflow.log_artifact(str(cm_path))
-
-		roc_path = artifacts_dir / "roc_curve.png"
-		plot_and_save_roc(y_test, y_proba, roc_path)
-		mlflow.log_artifact(str(roc_path))
-
-		# save model as pickle (additional artifact)
-		model_pkl = artifacts_dir / "model.pkl"
-		with open(model_pkl, "wb") as f:
-			pickle.dump(model, f)
-		mlflow.log_artifact(str(model_pkl))
-
-		# compute signature and input_example; resave model via mlflow with explicit signature
-		try:
-			input_example = X_train.head(3).copy()
-			signature = infer_signature(X_train, model.predict(X_train))
-		except Exception:
-			input_example = None
-			signature = None
-
-		# log model again (autolog still active) with signature and input_example
-		try:
-			mlflow.sklearn.log_model(
-				model,
-				artifact_path="model_tuned",
-				conda_env=str(conda_path),
-				signature=signature,
-				input_example=input_example,
-			)
-		except Exception:
-			pass
-
-		# create MLmodel descriptor and log it alongside artifacts
-		try:
-			active_run = mlflow.active_run()
-			run_id = active_run.info.run_id if active_run is not None else None
-		except Exception:
-			run_id = None
-
-		# write run_id to file for CI workflows to pick up
-		try:
-			if run_id:
-				run_id_path = base_dir / "run_id.txt"
-				run_id_path.write_text(run_id)
-				print(f"Wrote run_id to {run_id_path}: {run_id}")
-		except Exception:
-			pass
-
-		model_tuned_dir = artifacts_dir / "model_tuned"
-		model_tuned_dir.mkdir(exist_ok=True)
-
-		try:
-			model_size = int(os.path.getsize(model_pkl)) if model_pkl.exists() else 0
-		except Exception:
-			model_size = 0
-
-		mlmodel_content = f"""artifact_path: model_tuned
-flavors:
-  python_function:
-    env: conda.yaml
-    python_env: python_env.yaml
-    loader_module: mlflow.sklearn
-    model_path: model.pkl
-    predict_fn: predict
-    python_version: {platform.python_version()}
-  sklearn:
-    code: null
-    pickled_model: model.pkl
-    serialization_format: cloudpickle
-    sklearn_version: {_sklearn.__version__}
-mlflow_version: {mlflow.__version__}
-model_size_bytes: {model_size}
-model_uuid: {uuid.uuid4().hex}
-run_id: {run_id}
-utc_time_created: '{datetime.utcnow().isoformat(sep=" ")}'
-"""
-
-		mlmodel_path = model_tuned_dir / "MLmodel"
-		mlmodel_path.write_text(mlmodel_content)
-		mlflow.log_artifact(str(mlmodel_path), artifact_path="model_tuned")
-
-		repo_req = base_dir / "requirements.txt"
-		if repo_req.exists():
-			dest_req = artifacts_dir / "requirements.txt"
-			shutil.copy(repo_req, dest_req)
-			mlflow.log_artifact(str(dest_req))
-		
-		conda_path = artifacts_dir / "conda.yaml"
-		conda_content = (
-			"name: mlflow-env\nchannels:\n  - defaults\ndependencies:\n  - python=3.10\n  - pip\n  - pip:\n    - -r requirements.txt\n"
-		)
-		conda_path.write_text(conda_content)
-		mlflow.log_artifact(str(conda_path))
-
-		python_env = artifacts_dir / "python_env.yaml"
-		python_env.write_text(conda_content)
-		mlflow.log_artifact(str(python_env))
-
-		# Model is logged automatically by mlflow.autolog()
-
-		print("Run completed. Logged params, metrics, model, and artifacts to MLflow.")
-
+    print("Manual MLflow logging selesai")
 
 if __name__ == "__main__":
-	main()
-
+    main()
